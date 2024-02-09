@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -66,14 +65,14 @@ func BuildClientSchemaWithOptions(ctx context.Context, options BuildClientSchema
 	client := http.Client{Timeout: 2 * time.Minute}
 	res, err := client.Do(req)
 	if err != nil {
-		log.Fatal(err)
+		return "", err
 	}
 	defer res.Body.Close()
 
 	var schemaResponse introspectionResults
 	err = json.NewDecoder(res.Body).Decode(&schemaResponse)
 	if err != nil {
-		log.Fatal(err)
+		return "", err
 	}
 
 	if len(schemaResponse.Errors) != 0 {
@@ -96,7 +95,7 @@ func printSchema(schema introspectionSchema, withoutBuiltins bool) string {
 	return sb.String()
 }
 
-func printDirectives(sb *strings.Builder, directives []introspectionDirectiveDefinition, withoutBuiltins bool) {
+func printDirectives(sb *strings.Builder, directives []introspectionDirectiveDefinition, withoutBuiltins bool) error {
 	for _, directive := range directives {
 		if withoutBuiltins && containsStr(directive.Name, excludeDirectives) {
 			continue
@@ -107,7 +106,11 @@ func printDirectives(sb *strings.Builder, directives []introspectionDirectiveDef
 			sb.WriteString("(\n")
 			for _, arg := range directive.Args {
 				printDescription(sb, arg.Description)
-				sb.WriteString(fmt.Sprintf("\t%s: %s\n", arg.Name, introspectionTypeToAstType(arg.Type).String()))
+				astType, err := introspectionTypeToAstType(arg.Type)
+				if err != nil {
+					return fmt.Errorf("convert introspection type to AST type: %w\n%v", err, arg.Type)
+				}
+				sb.WriteString(fmt.Sprintf("\t%s: %s\n", arg.Name, astType.String()))
 			}
 			sb.WriteString(")")
 		}
@@ -122,9 +125,11 @@ func printDirectives(sb *strings.Builder, directives []introspectionDirectiveDef
 		sb.WriteString("\n")
 		sb.WriteString("\n")
 	}
+
+	return nil
 }
 
-func printTypes(sb *strings.Builder, types []introspectionTypeDefinition, withoutBuiltins bool) {
+func printTypes(sb *strings.Builder, types []introspectionTypeDefinition, withoutBuiltins bool) error {
 	for _, typ := range types {
 		if strings.HasPrefix(typ.Name, "__") {
 			continue
@@ -155,11 +160,19 @@ func printTypes(sb *strings.Builder, types []introspectionTypeDefinition, withou
 					sb.WriteString("(\n")
 					for _, arg := range field.Args {
 						printDescription(sb, arg.Description)
-						sb.WriteString(fmt.Sprintf("\t\t%s: %s\n", arg.Name, introspectionTypeToAstType(arg.Type).String()))
+						astType, err := introspectionTypeToAstType(arg.Type)
+						if err != nil {
+							return fmt.Errorf("convert introspection type to AST type: %w\n%v", err, arg.Type)
+						}
+						sb.WriteString(fmt.Sprintf("\t\t%s: %s\n", arg.Name, astType.String()))
 					}
 					sb.WriteString("\t)")
 				}
-				sb.WriteString(fmt.Sprintf(": %s\n", introspectionTypeToAstType(field.Type).String()))
+				astType, err := introspectionTypeToAstType(field.Type)
+				if err != nil {
+					return fmt.Errorf("convert introspection type to AST type: %w\n%v", err, field.Type)
+				}
+				sb.WriteString(fmt.Sprintf(": %s\n", astType.String()))
 			}
 			sb.WriteString("}")
 
@@ -167,10 +180,14 @@ func printTypes(sb *strings.Builder, types []introspectionTypeDefinition, withou
 			sb.WriteString(fmt.Sprintf("union %s =", typ.Name))
 			var possible []*introspectedType
 			if err := json.Unmarshal(typ.PossibleTypes, &possible); err != nil {
-				panic(err)
+				return err
 			}
 			for i, typ := range possible {
-				sb.WriteString(introspectionTypeToAstType(typ).String())
+				astType, err := introspectionTypeToAstType(typ)
+				if err != nil {
+					return fmt.Errorf("convert introspection type to AST type: %w\n%v", err, typ)
+				}
+				sb.WriteString(astType.String())
 				if i < len(possible)-1 {
 					sb.WriteString(" | ")
 				}
@@ -180,7 +197,7 @@ func printTypes(sb *strings.Builder, types []introspectionTypeDefinition, withou
 			sb.WriteString(fmt.Sprintf("enum %s {\n", typ.Name))
 			var enumValues ast.EnumValueList
 			if err := json.Unmarshal(typ.EnumValues, &enumValues); err != nil {
-				panic(err)
+				return fmt.Errorf("cannot unmarshal enum values: %w\n%v", err, typ.EnumValues)
 			}
 			for _, value := range enumValues {
 				printDescription(sb, value.Description)
@@ -195,18 +212,24 @@ func printTypes(sb *strings.Builder, types []introspectionTypeDefinition, withou
 			sb.WriteString(fmt.Sprintf("input %s {\n", typ.Name))
 			for _, field := range typ.InputFields {
 				printDescription(sb, typ.Description)
-				sb.WriteString(fmt.Sprintf("\t%s: %s\n", field.Name, introspectionTypeToAstType(field.Type).String()))
+				astType, err := introspectionTypeToAstType(field.Type)
+				if err != nil {
+					return fmt.Errorf("convert introspection type to AST type: %w\n%v", err, field.Type)
+				}
+				sb.WriteString(fmt.Sprintf("\t%s: %s\n", field.Name, astType.String()))
 			}
 			sb.WriteString("}")
 
 		case ast.Interface:
 			printInterface(sb, typ)
 		default:
-			panic(fmt.Sprint("not handling", typ.Kind))
+			return fmt.Errorf(fmt.Sprintf("not handling kind: %v", typ.Kind))
 		}
 		sb.WriteString("\n")
 		sb.WriteString("\n")
 	}
+
+	return nil
 }
 
 func printDescription(sb *strings.Builder, description string) {
@@ -216,9 +239,9 @@ func printDescription(sb *strings.Builder, description string) {
 	}
 }
 
-func printInterface(sb *strings.Builder, typ introspectionTypeDefinition) {
+func printInterface(sb *strings.Builder, typ introspectionTypeDefinition) error {
 	if typ.Kind != ast.Interface {
-		log.Fatalf("cannot print %v as %v", typ.Kind, ast.Interface)
+		return fmt.Errorf("cannot print %v as %v", typ.Kind, ast.Interface)
 	}
 
 	sb.WriteString(fmt.Sprintf("interface %s {\n", typ.Name))
@@ -228,11 +251,21 @@ func printInterface(sb *strings.Builder, typ introspectionTypeDefinition) {
 		if len(field.Args) > 0 {
 			sb.WriteString("(\n")
 			for _, arg := range field.Args {
-				sb.WriteString(fmt.Sprintf("\t\t%s: %s\n", arg.Name, introspectionTypeToAstType(arg.Type).String()))
+				astType, err := introspectionTypeToAstType(arg.Type)
+				if err != nil {
+					return fmt.Errorf("convert introspection type to AST type: %w\n%v", err, arg.Type)
+				}
+				sb.WriteString(fmt.Sprintf("\t\t%s: %s\n", arg.Name, astType.String()))
 			}
 			sb.WriteString("\t)")
 		}
-		sb.WriteString(fmt.Sprintf(": %s\n", introspectionTypeToAstType(field.Type).String()))
+		astType, err := introspectionTypeToAstType(field.Type)
+		if err != nil {
+			return fmt.Errorf("convert introspection type to AST type: %w\n%v", err, field.Type)
+		}
+		sb.WriteString(fmt.Sprintf(": %s\n", astType.String()))
 	}
 	sb.WriteString("}")
+
+	return nil
 }

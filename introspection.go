@@ -2,7 +2,7 @@ package gqlfetch
 
 import (
 	"encoding/json"
-	"log"
+	"fmt"
 
 	"github.com/vektah/gqlparser/ast"
 )
@@ -76,24 +76,31 @@ const (
 	OBJECT   introspectionTypeKind = "OBJECT"
 )
 
-func introspectionTypeToAstType(typ *introspectedType) *ast.Type {
+func introspectionTypeToAstType(typ *introspectedType) (*ast.Type, error) {
 	var res ast.Type
 	if typ.OfType == nil {
 		res.NamedType = *typ.Name
-		return &res
+		return &res, nil
 	}
 
 	switch typ.Kind {
 	case NON_NULL:
-		res = *introspectionTypeToAstType(typ.OfType)
+		astType, err := introspectionTypeToAstType(typ.OfType)
+		if err != nil {
+			return nil, fmt.Errorf("convert introspection type to AST type: %w\n%v", err, typ.OfType)
+		}
+		res = *astType
 		res.NonNull = true
-		return &res
+		return &res, nil
 	case LIST:
-		res.Elem = introspectionTypeToAstType(typ.OfType)
-		return &res
+		astType, err := introspectionTypeToAstType(typ.OfType)
+		if err != nil {
+			return nil, fmt.Errorf("convert introspection type to AST type: %w\n%v", err, typ.OfType)
+		}
+		res.Elem = astType
+		return &res, nil
 	default:
-		log.Fatalf("type kind unknown: %s", typ.Kind)
-		return nil
+		return nil, fmt.Errorf("type kind unknown: %s", typ.Kind)
 	}
 }
 
